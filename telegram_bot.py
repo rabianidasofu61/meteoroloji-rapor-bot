@@ -1,9 +1,11 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 import shutil
+import subprocess
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, Optional
@@ -25,6 +27,7 @@ from telegram.ext import (
 )
 
 from config import (
+    BASE_DIR,
     TELEGRAM_BOT_TOKEN,
     PORT,
     PUBLIC_URL,
@@ -50,6 +53,131 @@ logger = logging.getLogger(__name__)
 USER_DRAFTS: Dict[int, Dict] = {}
 USER_STATE: Dict[int, str] = {}
 START_TIME = datetime.now()
+OWNER_LOCK_FILE = BASE_DIR / ".owner_lock.sha256"
+
+PRIVATE_WORKFLOW_YML = """name: TARSIM Telegram Rapor Botu (7-24 Bulut)
+
+on:
+  schedule:
+    # Her 5 saatte bir yeni döngü başlatarak 7/24 kesintisiz çalışır
+    - cron: "0 */5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: tarsim-7-24-bot
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  run-telegram-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 310
+    steps:
+      - name: Depoyu İndir
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 Kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Kütüphaneleri ve Playwright Chromium Tarayıcısını Kur
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Telegram Botunu Çalıştır (5 Saatlik Kesintisiz Döngü)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TZ: Europe/Istanbul
+        run: |
+          timeout 17500s python telegram_bot.py || true
+
+      - name: Sadece Kullanıcı Kilidi ve Mevsim Normalleri Excel Dosyasını Kaydet (Raporlar Gizli Kalır)
+        run: |
+          git config user.name "TARSIM Rapor Bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add ".owner_lock.sha256" "templates/mevsim_normalleri.xlsx" || true
+          git diff --staged --quiet || (git commit -m "Guvenlik kilidi / normaller guncellemesi" && git push)
+"""
+
+
+def _compute_user_hash(user_id: int) -> str:
+    return hashlib.sha256(f"tarsim_61_lock:{user_id}".encode("utf-8")).hexdigest()
+
+
+def _sync_git_files(files_to_add, commit_msg: str):
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    try:
+        subprocess.run(["git", "config", "user.name", "TARSIM Rapor Bot"], cwd=str(BASE_DIR), check=False)
+        subprocess.run(["git", "config", "user.email", "bot@users.noreply.github.com"], cwd=str(BASE_DIR), check=False)
+        subprocess.run(["git", "pull", "--rebase", "origin", "main"], cwd=str(BASE_DIR), check=False)
+        for f in files_to_add:
+            subprocess.run(["git", "add", str(f)], cwd=str(BASE_DIR), check=False)
+        diff = subprocess.run(["git", "diff", "--staged", "--quiet"], cwd=str(BASE_DIR))
+        if diff.returncode != 0:
+            subprocess.run(["git", "commit", "-m", commit_msg], cwd=str(BASE_DIR), check=False)
+            subprocess.run(["git", "push", "origin", "main"], cwd=str(BASE_DIR), check=False)
+    except Exception as e:
+        logger.warning(f"Git senkronizasyon uyarısı: {e}")
+
+
+def _ensure_private_workflow_on_github():
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    wf_path = BASE_DIR / ".github" / "workflows" / "main.yml"
+    try:
+        if wf_path.exists():
+            current = wf_path.read_text(encoding="utf-8", errors="ignore")
+            if "Üretilen Raporlar" in current or "cancel-in-progress" not in current:
+                wf_path.write_text(PRIVATE_WORKFLOW_YML, encoding="utf-8")
+                _sync_git_files([".github/workflows/main.yml"], "Rapor gizliligi aktif edildi")
+    except Exception as e:
+        logger.warning(f"Workflow güncelleme uyarısı: {e}")
+
+
+async def _check_authorized(update: Update) -> bool:
+    user = update.effective_user
+    if not user:
+        return False
+    user_id = user.id
+    user_hash = _compute_user_hash(user_id)
+
+    env_allowed = os.environ.get("ALLOWED_USER_ID", "").strip()
+    if env_allowed and str(user_id) != env_allowed:
+        if update.callback_query:
+            await update.callback_query.answer("⛔ Bu bot özeldir. Erişim yetkiniz bulunmamaktadır.", show_alert=True)
+        elif update.message:
+            await update.message.reply_text("⛔ Bu bot özeldir. Sadece yetkili TARSİM kullanıcısı işlem yapabilir.")
+        return False
+
+    if OWNER_LOCK_FILE.exists():
+        saved_hash = OWNER_LOCK_FILE.read_text(encoding="utf-8").strip()
+        if saved_hash and saved_hash != user_hash:
+            if update.callback_query:
+                await update.callback_query.answer("⛔ Bu bot özeldir. Erişim yetkiniz bulunmamaktadır.", show_alert=True)
+            elif update.message:
+                await update.message.reply_text("⛔ Bu bot özeldir. Sadece yetkili TARSİM kullanıcısı işlem yapabilir.")
+            return False
+        return True
+
+    # İlk kez mesaj atan sahibini otomatik kaydet ve kilitle
+    OWNER_LOCK_FILE.write_text(user_hash, encoding="utf-8")
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(None, _sync_git_files, [".owner_lock.sha256"], "Yetkili Telegram kullanici kilidi aktif edildi")
+    if update.message:
+        await update.message.reply_text(
+            "🔒 *Güvenlik Kilidi Aktif Edildi!*\n"
+            "Telegram hesabınız bu botun tek yetkili sahibi olarak tanımlandı. "
+            "Artık sizden başka hiç kimse bu botu kullanamaz ve ürettiğiniz raporlar GitHub'a yüklenmez.",
+            parse_mode="Markdown",
+        )
+    return True
 
 
 def _get_monday(d: date) -> date:
@@ -196,10 +324,13 @@ def _get_main_menu_keyboard() -> InlineKeyboardMarkup:
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_authorized(update):
+        return
     user_id = update.effective_user.id
     USER_STATE.pop(user_id, None)
     welcome = (
-        "🌦️ *TARSİM Haftalık Meteorolojik Değerlendirme Rapor Botu (7/24 Bulut Destekli)*\n\n"
+        "🌦️ *TARSİM Haftalık Meteorolojik Değerlendirme Rapor Botu (7/24 Özel Bulut)*\n\n"
+        "🔒 *Özel Erişim Kilidi Aktif:* Sadece sizin Telegram hesabınıza yanıt verir ve üretilen raporlar GitHub'a yüklenmez.\n\n"
         "Bu bot ile bilgisayarınız kapalıyken bile telefondan veya her yerden:\n"
         "1️⃣ Geçen haftanın raporunu otomatik okuyup geçmiş zaman kipine (*tahmin edilmekteydi, beklenmekteydi*) çevirebilir,\n"
         "2️⃣ Yeni haftanın saatlik yağış, rüzgâr/fırtına ve don analizlerini otomatik oluşturabilir,\n"
@@ -211,7 +342,26 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome, parse_mode="Markdown", reply_markup=_get_main_menu_keyboard())
 
 
+async def normaller_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_authorized(update):
+        return
+    if EXCEL_PATH.exists():
+        with open(EXCEL_PATH, "rb") as fp:
+            await update.message.reply_document(
+                document=InputFile(fp, filename=EXCEL_PATH.name),
+                caption=(
+                    "📊 Mevcut `mevsim_normalleri.xlsx` dosyası.\n"
+                    "Güncellemek istediğinizde yeni `.xlsx` dosyasını bu sohbete göndermeniz yeterlidir."
+                ),
+                parse_mode="Markdown",
+            )
+    else:
+        await update.message.reply_text("⚠️ Mevsim normalleri Excel dosyası bulunamadı.")
+
+
 async def rapor_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_authorized(update):
+        return
     user_id = update.effective_user.id
     args = context.args
     if args:
@@ -247,6 +397,8 @@ async def _create_and_send_draft(msg_obj, user_id: int, target_monday: date):
 
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_authorized(update):
+        return
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -490,10 +642,17 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 document=InputFile(fp, filename=out_docx_path.name),
                 caption=f"📊 {draft['curr_range_str']} Haftalık Meteorolojik Değerlendirme",
             )
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            try:
+                out_docx_path.unlink(missing_ok=True)
+            except Exception:
+                pass
         return
 
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _check_authorized(update):
+        return
     user_id = update.effective_user.id
     text = (update.message.text or "").strip()
     state = USER_STATE.get(user_id)
@@ -683,6 +842,8 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     - .xlsx dosyası gönderirse -> mevsim_normalleri.xlsx dosyasını günceller.
     - .docx dosyası gönderirse -> önceki hafta raporu olarak kaydeder ve 1. Bölüme geçmiş zamanla aktarır.
     """
+    if not await _check_authorized(update):
+        return
     user_id = update.effective_user.id
     doc = update.message.document
     if not doc:
@@ -697,6 +858,8 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             shutil.copy2(EXCEL_PATH, FALLBACK_EXCEL_PATH)
         except Exception:
             pass
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, _sync_git_files, ["templates/mevsim_normalleri.xlsx"], "Mevsim normalleri Excel guncellemesi")
         await update.message.reply_text(
             f"✅ *Mevsim Normalleri Excel dosyası (`{EXCEL_PATH.name}`) başarıyla güncellendi!*",
             parse_mode="Markdown",
@@ -713,14 +876,14 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             draft["sec1_intro"] = sec2["intro"]
             draft["sec1_bullets"] = sec2["bullets"]
             await update.message.reply_text(
-                f"✅ `{fname}` kaydedildi ve 2. Bölümü geçmiş zaman kipine (*-mekteydi*) çevrilerek "
-                f"aktif taslağın *1. Bölümüne* aktarıldı!",
+                f"✅ `{fname}` okundu ve 2. Bölümü geçmiş zaman kipine (*-mekteydi*) çevrilerek "
+                f"aktif taslağın *1. Bölümüne* aktarıldı! (Gizlilik gereği GitHub'a yüklenmedi).",
                 parse_mode="Markdown",
                 reply_markup=_get_draft_keyboard(),
             )
         else:
             await update.message.reply_text(
-                f"✅ `{fname}` dosyası bulut/sistem klasörüne kaydedildi. Yeni rapor oluşturduğunuzda 1. Bölüm için otomatik kullanılacaktır.",
+                f"✅ `{fname}` dosyası aktif oturuma alındı. Yeni rapor oluşturduğunuzda 1. Bölüm için otomatik kullanılacaktır (GitHub'a yüklenmez).",
                 parse_mode="Markdown",
             )
 
@@ -770,6 +933,7 @@ async def _keep_alive_loop():
 
 
 async def main_async():
+    _ensure_private_workflow_on_github()
     # 1) HTTP Health-Check Sunucusunu başlat (Hugging Face Spaces & Render 7/24 uyumu)
     web_app = web.Application()
     web_app.router.add_get("/", _handle_health)
@@ -795,6 +959,7 @@ async def main_async():
     tg_app.add_handler(CommandHandler("start", start_cmd))
     tg_app.add_handler(CommandHandler("menu", start_cmd))
     tg_app.add_handler(CommandHandler("yardim", start_cmd))
+    tg_app.add_handler(CommandHandler("normaller", normaller_cmd))
     tg_app.add_handler(CommandHandler("rapor", rapor_cmd))
     tg_app.add_handler(CallbackQueryHandler(callback_handler))
     tg_app.add_handler(MessageHandler(filters.Document.ALL, document_handler))
