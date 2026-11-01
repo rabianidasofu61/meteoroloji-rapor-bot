@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from PIL import Image, ImageDraw
@@ -17,8 +17,14 @@ def _local_to_windy_utc_str(date_iso: str, hour_str: str) -> Tuple[str, int]:
     """
     Türkiye yerel saatini (UTC+3) Windy URL formatına ('YYYYMMDDHH' UTC)
     ve Unix epoch milisaniyesine çevirir.
+    Eğer seçilen tarih geçmişteyse (Windy geçmiş günler için il sıcaklık değerlerini
+    göstermediğinden) aynı haftanın güncel/gelecek karşılığına hizalar.
     """
     dt_local = datetime.strptime(f"{date_iso} {hour_str}", "%Y-%m-%d %H:%M")
+    now_local = datetime.now()
+    while dt_local < now_local - timedelta(hours=3):
+        dt_local += timedelta(days=7)
+
     tz_tr = timezone(timedelta(hours=3))
     dt_aware = dt_local.replace(tzinfo=tz_tr)
     dt_utc = dt_aware.astimezone(timezone.utc)
@@ -35,6 +41,35 @@ def _create_fallback_map_image(out_path: Path, title: str, subtitle: str) -> Pat
     return out_path
 
 
+async def _clean_windy_ui(page):
+    """Arama kutusu, logo ve çerez pencerelerini gizler; Türkiye kadrajını sabitler."""
+    try:
+        await page.evaluate(
+            """([lat, lon, zoom]) => {
+                const closeSelectors = [
+                    '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll',
+                    '.cookie-banner button',
+                    '.onboarding-close',
+                    '[data-do="close"]'
+                ];
+                for (const sel of closeSelectors) {
+                    const el = document.querySelector(sel);
+                    if (el) { try { el.click(); } catch(e) {} }
+                }
+                for (const s of ['#search', '#logo']) {
+                    const el = document.querySelector(s);
+                    if (el) el.style.display = 'none';
+                }
+                if (window.W && window.W.map) {
+                    try { window.W.map.setView([lat, lon], zoom); } catch(e) {}
+                }
+            }""",
+            [TURKEY_LAT, TURKEY_LON, TURKEY_ZOOM],
+        )
+    except Exception:
+        pass
+
+
 async def capture_windy_maps_async(
     temp_maps: List[Dict],
     extra_maps: Optional[List[Dict]] = None,
@@ -42,7 +77,7 @@ async def capture_windy_maps_async(
 ) -> Tuple[List[Dict], List[Dict]]:
     """
     Playwright kullanarak Windy.com üzerinden Türkiye'yi tam kapsayacak şekilde (Zoom=7, 1913x864):
-    - Her haftanın raporunda sabit yer alan 8 adet 06:00 Türkiye Sıcaklık Haritasını (temp katmanı),
+    - Her haftanın raporunda sabit yer alan 8 adet 06:00 Türkiye Sıcaklık Haritasını (il sıcaklık değerleriyle),
     - Türkiye genelinde yağışlı günlerde Yağış Haritasını (rain katmanı),
     - CAPE değerlerinin yüksek olduğu günlerde CAPE İndeksi Haritasını (cape katmanı)
     otomatik olarak ekran görüntüsü alır.
@@ -69,47 +104,8 @@ async def capture_windy_maps_async(
         )
         page = await context.new_page()
 
-        first_date = temp_maps[0]["morning_date"] if temp_maps else datetime.now().strftime("%Y-%m-%d")
-        utc_str, ts_ms = _local_to_windy_utc_str(first_date, "06:00")
-        init_url = f"https://www.windy.com/?temp,{utc_str},{TURKEY_LAT:.3f},{TURKEY_LON:.3f},{TURKEY_ZOOM}"
-
-        try:
-            await page.goto(init_url, wait_until="domcontentloaded", timeout=35000)
-            await asyncio.sleep(4.5)
-            await page.evaluate(
-                """([lat, lon, zoom]) => {
-                    const closeSelectors = [
-                        '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll',
-                        '.cookie-banner button',
-                        '.onboarding-close',
-                        '[data-do="close"]'
-                    ];
-                    for (const sel of closeSelectors) {
-                        const el = document.querySelector(sel);
-                        if (el) { try { el.click(); } catch(e) {} }
-                    }
-                    // Sol üst arama çubuğu ve logoyu gizle (örnek görsellerdeki gibi temiz görünüm)
-                    for (const s of ['#search', '#logo']) {
-                        const el = document.querySelector(s);
-                        if (el) el.style.display = 'none';
-                    }
-                    if (window.W && window.W.store) {
-                        try {
-                            window.W.store.set('product', 'ecmwf');
-                            window.W.store.set('isolines', 'pressure');
-                        } catch(e) {}
-                    }
-                    if (window.W && window.W.map) {
-                        try { window.W.map.setView([lat, lon], zoom); } catch(e) {}
-                    }
-                }""",
-                [TURKEY_LAT, TURKEY_LON, TURKEY_ZOOM],
-            )
-        except Exception:
-            pass
-
         # 1) 8 adet 06:00 Türkiye Sıcaklık Haritası (Her haftalık raporda zorunlu)
-        for m in temp_maps:
+        for idx, m in enumerate(temp_maps):
             done_count += 1
             m_date = m["morning_date"]
             m_hour = m.get("hour", "06:00")
@@ -121,29 +117,13 @@ async def capture_windy_maps_async(
                 except Exception:
                     pass
 
-            utc_str, ts_ms = _local_to_windy_utc_str(m_date, m_hour)
+            utc_str, _ = _local_to_windy_utc_str(m_date, m_hour)
+            url = f"https://www.windy.com/?temp,{utc_str},{TURKEY_LAT:.3f},{TURKEY_LON:.3f},{TURKEY_ZOOM}"
             try:
-                changed = await page.evaluate(
-                    """([ts, overlay, lat, lon, zoom]) => {
-                        if (window.W && window.W.store) {
-                            window.W.store.set('overlay', overlay);
-                            window.W.store.set('product', 'ecmwf');
-                            window.W.store.set('isolines', 'pressure');
-                            window.W.store.set('timestamp', ts);
-                            if (window.W.map) {
-                                window.W.map.setView([lat, lon], zoom);
-                            }
-                            return true;
-                        }
-                        return false;
-                    }""",
-                    [ts_ms, "temp", TURKEY_LAT, TURKEY_LON, TURKEY_ZOOM],
-                )
-                if not changed:
-                    url = f"https://www.windy.com/?temp,{utc_str},{TURKEY_LAT:.3f},{TURKEY_LON:.3f},{TURKEY_ZOOM}"
-                    await page.goto(url, wait_until="domcontentloaded", timeout=25000)
-
-                await asyncio.sleep(2.8)
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(4.2 if idx == 0 else 3.2)
+                await _clean_windy_ui(page)
+                await asyncio.sleep(1.2)
                 await page.screenshot(path=str(out_file), full_page=False)
                 m["image_path"] = str(out_file)
             except Exception as e:
@@ -164,29 +144,13 @@ async def capture_windy_maps_async(
                 except Exception:
                     pass
 
-            utc_str, ts_ms = _local_to_windy_utc_str(em_date, em_hour)
+            utc_str, _ = _local_to_windy_utc_str(em_date, em_hour)
+            url = f"https://www.windy.com/?{em_type},{utc_str},{TURKEY_LAT:.3f},{TURKEY_LON:.3f},{TURKEY_ZOOM}"
             try:
-                changed = await page.evaluate(
-                    """([ts, overlay, lat, lon, zoom]) => {
-                        if (window.W && window.W.store) {
-                            window.W.store.set('overlay', overlay);
-                            window.W.store.set('product', 'ecmwf');
-                            window.W.store.set('isolines', 'gh');
-                            window.W.store.set('timestamp', ts);
-                            if (window.W.map) {
-                                window.W.map.setView([lat, lon], zoom);
-                            }
-                            return true;
-                        }
-                        return false;
-                    }""",
-                    [ts_ms, em_type, TURKEY_LAT, TURKEY_LON, TURKEY_ZOOM],
-                )
-                if not changed:
-                    url = f"https://www.windy.com/?{em_type},{utc_str},{TURKEY_LAT:.3f},{TURKEY_LON:.3f},{TURKEY_ZOOM}"
-                    await page.goto(url, wait_until="domcontentloaded", timeout=25000)
-
-                await asyncio.sleep(3.0)
+                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(3.5)
+                await _clean_windy_ui(page)
+                await asyncio.sleep(1.2)
                 await page.screenshot(path=str(out_file), full_page=False)
                 em["image_path"] = str(out_file)
             except Exception as e:

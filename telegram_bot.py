@@ -157,19 +157,31 @@ def _get_draft_keyboard() -> InlineKeyboardMarkup:
 
 def _get_main_menu_keyboard() -> InlineKeyboardMarkup:
     today = date.today()
-    this_mon = _get_monday(today)
-    next_mon = this_mon + timedelta(days=7)
+    cur_mon = _get_monday(today)
+    next_mon = cur_mon + timedelta(days=7)
+    # Cuma, Cumartesi veya Pazar günü rapor hazırlanıyorsa ilk sırada gelecek Pazartesi-Pazar haftasını göster
+    if today.weekday() >= 4:
+        primary_mon = next_mon
+        secondary_mon = cur_mon
+        primary_label = f"📅 Yeni Hafta ({primary_mon.strftime('%d.%m')} - {(primary_mon+timedelta(days=6)).strftime('%d.%m.%Y')})"
+        secondary_label = f"⏪ Bitmekte Olan Hafta ({secondary_mon.strftime('%d.%m')} - {(secondary_mon+timedelta(days=6)).strftime('%d.%m.%Y')})"
+    else:
+        primary_mon = cur_mon
+        secondary_mon = next_mon
+        primary_label = f"📅 Bu Hafta ({primary_mon.strftime('%d.%m')} - {(primary_mon+timedelta(days=6)).strftime('%d.%m.%Y')})"
+        secondary_label = f"⏭️ Gelecek Hafta ({secondary_mon.strftime('%d.%m')} - {(secondary_mon+timedelta(days=6)).strftime('%d.%m.%Y')})"
+
     keyboard = [
         [
             InlineKeyboardButton(
-                f"📅 Bu Hafta ({this_mon.strftime('%d.%m')} - {(this_mon+timedelta(days=6)).strftime('%d.%m.%Y')})",
-                callback_data=f"new_week_{this_mon.isoformat()}",
+                primary_label,
+                callback_data=f"new_week_{primary_mon.isoformat()}",
             )
         ],
         [
             InlineKeyboardButton(
-                f"⏭️ Gelecek Hafta ({next_mon.strftime('%d.%m')} - {(next_mon+timedelta(days=6)).strftime('%d.%m.%Y')})",
-                callback_data=f"new_week_{next_mon.isoformat()}",
+                secondary_label,
+                callback_data=f"new_week_{secondary_mon.isoformat()}",
             )
         ],
         [

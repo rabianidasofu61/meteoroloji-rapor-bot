@@ -169,8 +169,12 @@ def _create_frost_table8(doc, table8_rows: List[Tuple[str, str]]):
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             p.paragraph_format.space_before = Pt(2)
             p.paragraph_format.space_after = Pt(2)
-            r = p.add_run(val)
-            _set_run_font(r, size_pt=12, bold=False)
+            lines = str(val).split("\n")
+            for l_i, line_txt in enumerate(lines):
+                r = p.add_run(line_txt)
+                _set_run_font(r, size_pt=12, bold=False)
+                if l_i < len(lines) - 1:
+                    r.add_break()
 
     return tbl._tbl
 
@@ -199,9 +203,8 @@ def generate_weekly_report_docx(draft: Dict, save_to_documents: bool = True) -> 
     report_title = f"{draft['curr_range_str']} Haftalık Meteorolojik Değerlendirme"
     _update_cover_page_sdt(body, draft["prep_date_str"], report_title)
 
-    # 2) Sabit 6. ve 7. bölümlerin başlangıç indeksini bul ('6) Zirai Don Hadisesinde Kritik Saatler')
-    sec6_anchor = None
-    to_remove = []
+    # 2) Sabit 6. ve 7. bölümlerin gerçek başlangıç indeksini bul (İçindekiler'deki 6) satırını atla)
+    sec6_indices = []
     for idx in range(2, len(body)):
         child = body[idx]
         tag = child.tag.split("}")[-1]
@@ -209,9 +212,15 @@ def generate_weekly_report_docx(draft: Dict, save_to_documents: bool = True) -> 
             continue
         txt = "".join(child.itertext()).strip()
         if txt.startswith("6) Zirai Don Hadisesinde Kritik Saatler"):
-            sec6_anchor = child
-            break
-        to_remove.append(child)
+            sec6_indices.append(idx)
+
+    if sec6_indices:
+        real_sec6_idx = sec6_indices[-1]
+        sec6_anchor = body[real_sec6_idx]
+        to_remove = [body[i] for i in range(2, real_sec6_idx)]
+    else:
+        sec6_anchor = None
+        to_remove = [body[i] for i in range(2, len(body)) if body[i].tag.split("}")[-1] != "sectPr"]
 
     for el in to_remove:
         body.remove(el)

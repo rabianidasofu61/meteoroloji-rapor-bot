@@ -185,6 +185,7 @@ def synthesize_daily_bullet(
         )
     else:
         precip_word = "yağış ve kar yağışı" if snow_regions else "yağış"
+        precip_plural = "yağış ve kar yağışlarının" if snow_regions else "yağışların"
         parts = []
 
         if len(all_rain_regions) >= 5:
@@ -192,12 +193,12 @@ def synthesize_daily_bullet(
                 m_str = _join_regions_tr(morning_rain_regions)
                 parts.append(
                     f"Sabah saatlerinde {m_str} kesimlerinde, öğle saatlerinden sonra ise "
-                    f"neredeyse tüm yurtta {precip_word}lı havanın hâkim olması ön görülmektedir."
+                    f"neredeyse tüm yurtta yağışlı havanın hâkim olması ön görülmektedir."
                 )
             else:
                 parts.append(
                     f"Etkili olan alçak basınç sistemi nedeniyle gün içerisinde "
-                    f"neredeyse tüm yurtta {precip_word}lı havanın hâkim olması beklenmektedir."
+                    f"neredeyse tüm yurtta yağışlı havanın hâkim olması beklenmektedir."
                 )
         else:
             if morning_rain_regions and afternoon_rain_regions:
@@ -206,7 +207,7 @@ def synthesize_daily_bullet(
                 if a_only:
                     a_str = _join_regions_tr(a_only)
                     parts.append(
-                        f"Sabah saatlerinde {m_str} bölgesinde başlayan {precip_word}ların, "
+                        f"Sabah saatlerinde {m_str} bölgesinde başlayan {precip_plural}, "
                         f"öğle saatlerinden sonra etki alanını genişleterek {a_str} kesimlerinde de etkili olması beklenmektedir."
                     )
                 else:
