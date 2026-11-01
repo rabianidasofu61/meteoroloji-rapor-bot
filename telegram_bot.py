@@ -55,56 +55,6 @@ USER_STATE: Dict[int, str] = {}
 START_TIME = datetime.now()
 OWNER_LOCK_FILE = BASE_DIR / ".owner_lock.sha256"
 
-PRIVATE_WORKFLOW_YML = """name: TARSIM Telegram Rapor Botu (7-24 Bulut)
-
-on:
-  schedule:
-    # Her 5 saatte bir yeni döngü başlatarak 7/24 kesintisiz çalışır
-    - cron: "0 */5 * * *"
-  workflow_dispatch:
-
-concurrency:
-  group: tarsim-7-24-bot
-  cancel-in-progress: true
-
-permissions:
-  contents: write
-
-jobs:
-  run-telegram-bot:
-    runs-on: ubuntu-latest
-    timeout-minutes: 310
-    steps:
-      - name: Depoyu İndir
-        uses: actions/checkout@v4
-
-      - name: Python 3.11 Kur
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Kütüphaneleri ve Playwright Chromium Tarayıcısını Kur
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
-          playwright install --with-deps chromium
-
-      - name: Telegram Botunu Çalıştır (5 Saatlik Kesintisiz Döngü)
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TZ: Europe/Istanbul
-        run: |
-          timeout 17500s python telegram_bot.py || true
-
-      - name: Sadece Kullanıcı Kilidi ve Mevsim Normalleri Excel Dosyasını Kaydet (Raporlar Gizli Kalır)
-        run: |
-          git config user.name "TARSIM Rapor Bot"
-          git config user.email "bot@users.noreply.github.com"
-          git add ".owner_lock.sha256" "templates/mevsim_normalleri.xlsx" || true
-          git diff --staged --quiet || (git commit -m "Guvenlik kilidi / normaller guncellemesi" && git push)
-"""
-
 
 def _compute_user_hash(user_id: int) -> str:
     return hashlib.sha256(f"tarsim_61_lock:{user_id}".encode("utf-8")).hexdigest()
@@ -116,29 +66,15 @@ def _sync_git_files(files_to_add, commit_msg: str):
     try:
         subprocess.run(["git", "config", "user.name", "TARSIM Rapor Bot"], cwd=str(BASE_DIR), check=False)
         subprocess.run(["git", "config", "user.email", "bot@users.noreply.github.com"], cwd=str(BASE_DIR), check=False)
-        subprocess.run(["git", "pull", "--rebase", "origin", "main"], cwd=str(BASE_DIR), check=False)
         for f in files_to_add:
             subprocess.run(["git", "add", str(f)], cwd=str(BASE_DIR), check=False)
         diff = subprocess.run(["git", "diff", "--staged", "--quiet"], cwd=str(BASE_DIR))
         if diff.returncode != 0:
             subprocess.run(["git", "commit", "-m", commit_msg], cwd=str(BASE_DIR), check=False)
+            subprocess.run(["git", "pull", "--rebase", "origin", "main"], cwd=str(BASE_DIR), check=False)
             subprocess.run(["git", "push", "origin", "main"], cwd=str(BASE_DIR), check=False)
     except Exception as e:
         logger.warning(f"Git senkronizasyon uyarısı: {e}")
-
-
-def _ensure_private_workflow_on_github():
-    if os.environ.get("GITHUB_ACTIONS") != "true":
-        return
-    wf_path = BASE_DIR / ".github" / "workflows" / "main.yml"
-    try:
-        if wf_path.exists():
-            current = wf_path.read_text(encoding="utf-8", errors="ignore")
-            if "Üretilen Raporlar" in current or "cancel-in-progress" not in current:
-                wf_path.write_text(PRIVATE_WORKFLOW_YML, encoding="utf-8")
-                _sync_git_files([".github/workflows/main.yml"], "Rapor gizliligi aktif edildi")
-    except Exception as e:
-        logger.warning(f"Workflow güncelleme uyarısı: {e}")
 
 
 async def _check_authorized(update: Update) -> bool:
@@ -933,7 +869,6 @@ async def _keep_alive_loop():
 
 
 async def main_async():
-    _ensure_private_workflow_on_github()
     # 1) HTTP Health-Check Sunucusunu başlat (Hugging Face Spaces & Render 7/24 uyumu)
     web_app = web.Application()
     web_app.router.add_get("/", _handle_health)
