@@ -2,17 +2,19 @@ name: TARSIM Telegram Rapor Botu (7-24 Bulut)
 
 on:
   schedule:
-    # Her 5 saatte bir yeni döngü başlatarak 7/24 kesintisiz çalışır
-    - cron: "0 */5 * * *"
+    - cron: "*/15 * * * *"
   workflow_dispatch:
-    inputs:
-      hemen_rapor_tarihi:
-        description: "İsteğe bağlı: Doğrudan rapor üretilecek Pazartesi tarihi (Örn: 24.08.2026) veya boş bırakın (Telegram botu dinlemede kalır)"
-        required: false
-        default: ""
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: tarsim-7-24-bot
+  cancel-in-progress: false
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   run-telegram-bot:
@@ -39,12 +41,14 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TZ: Europe/Istanbul
         run: |
-          # 5 saat (18000 sn) boyunca Telegram botunu aktif tutar, ardından güncel dosyaları kaydeder
           timeout 17500s python telegram_bot.py || true
 
-      - name: Güncellenen Excel ve Üretilen Raporları Depoya Kaydet
+      - name: Kullanıcı Kilidi ve Normalleri Kaydet ve Yeni Döngüyü Başlat
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "TARSIM Rapor Bot"
           git config user.email "bot@users.noreply.github.com"
-          git add "templates/mevsim_normalleri.xlsx" "Haftalık Rapor Bot Documents/" "Üretilen Raporlar/" || true
-          git diff --staged --quiet || (git commit -m "Otomatik rapor/normaller yedeklemesi" && git push)
+          git add ".owner_lock.sha256" "templates/mevsim_normalleri.xlsx" || true
+          git diff --staged --quiet || (git commit -m "Otomatik senkronizasyon" && git pull --rebase origin main && git push origin main) || true
+          gh workflow run main.yml || true
