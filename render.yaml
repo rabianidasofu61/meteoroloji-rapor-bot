@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: tarsim-meteoroloji-rapor-bot
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 7860
+      - key: TZ
+        value: Europe/Istanbul
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
