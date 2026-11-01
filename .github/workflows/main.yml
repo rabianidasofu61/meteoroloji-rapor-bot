@@ -1,0 +1,50 @@
+name: TARSIM Telegram Rapor Botu (7-24 Bulut)
+
+on:
+  schedule:
+    # Her 5 saatte bir yeni döngü başlatarak 7/24 kesintisiz çalışır
+    - cron: "0 */5 * * *"
+  workflow_dispatch:
+    inputs:
+      hemen_rapor_tarihi:
+        description: "İsteğe bağlı: Doğrudan rapor üretilecek Pazartesi tarihi (Örn: 24.08.2026) veya boş bırakın (Telegram botu dinlemede kalır)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  run-telegram-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 310
+    steps:
+      - name: Depoyu İndir
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 Kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Kütüphaneleri ve Playwright Chromium Tarayıcısını Kur
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Telegram Botunu Çalıştır (5 Saatlik Kesintisiz Döngü)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TZ: Europe/Istanbul
+        run: |
+          # 5 saat (18000 sn) boyunca Telegram botunu aktif tutar, ardından güncel dosyaları kaydeder
+          timeout 17500s python telegram_bot.py || true
+
+      - name: Güncellenen Excel ve Üretilen Raporları Depoya Kaydet
+        run: |
+          git config user.name "TARSIM Rapor Bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add "templates/mevsim_normalleri.xlsx" "Haftalık Rapor Bot Documents/" "Üretilen Raporlar/" || true
+          git diff --staged --quiet || (git commit -m "Otomatik rapor/normaller yedeklemesi" && git push)
